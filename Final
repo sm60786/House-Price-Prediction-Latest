@@ -1,0 +1,386 @@
+import numpy as np
+import pandas as pd
+pd.set_option('max_columns', None)
+pd.set_option('max_rows', 90)
+
+train0 = pd.read_csv('train.csv')
+test0 = pd.read_csv('test.csv')
+sample_submission = pd.read_csv('sample_submission.csv')
+
+train0.head()
+
+test0.head()
+
+sample_submission.head()
+
+## Cleaning
+
+train0.isna().sum()
+
+test0.isna().sum()
+
+## Combining Train & Test Sets
+
+target = train0['SalePrice']
+test_ids = test0['Id']
+
+train1 = train0.drop(['Id', 'SalePrice'], axis=1)
+test1 = test0.drop('Id', axis=1)
+
+data1 = pd.concat([train1, test1], axis=0).reset_index(drop=True) #axis=0 for stacking on top of each other 
+data1
+
+target
+
+## Cleaning
+
+### Ensure Proper Datatypes(dtypes)
+
+data2 = data1.copy()
+
+data2['MSSubClass'] = data2['MSSubClass'].astype(str)
+
+#### Fill categorical null values
+
+data2.select_dtypes('object').loc[:, data2.isna().sum() > 0].columns #Objects Columns with missing values
+
+#Impute using constant value
+for column in [
+    'Alley',
+    'BsmtQual',
+    'BsmtCond',
+    'BsmtExposure',
+    'BsmtFinType1',
+    'BsmtFinType2',
+    'FireplaceQu',
+    'GarageType',
+    'GarageFinish',
+    'GarageQual',
+    'GarageCond',
+    'PoolQC',
+    'Fence',
+    'MiscFeature'
+]:
+    data2[column] = data2[column].fillna('None')
+
+#Impute using the column mode
+for column in [
+    'MSZoning',
+    'Utilities',
+    'Exterior1st',
+    'Exterior2nd',
+    'MasVnrType',
+    'Electrical',
+    'KitchenQual',
+    'Functional',
+    'SaleType'
+]:
+    data2[column] = data2[column].fillna(data2[column].mode()[0])  #[0] means mode returns multiple values, 0 means the top frequent value
+
+    
+
+data2.select_dtypes('object').isna().sum().sum()
+
+data2.select_dtypes(np.number).isna().sum().sum()
+
+data3 = data2.copy()
+
+### Work with numeric missing values
+
+from sklearn.neighbors import KNeighborsRegressor
+
+data3.loc[data3['LotFrontage'].isna() == True, 'LotFrontage']
+
+def knn_impute(df, na_target):  #na_target: the column which we wanna fill
+    df = df.copy()
+
+    numeric_df = df.select_dtypes(np.number)
+    non_na_columns = numeric_df.loc[:, numeric_df.isna().sum() == 0].columns #Columns with no missing values
+
+    y_train = numeric_df.loc[numeric_df[na_target].isna() == False, na_target]
+    X_train = numeric_df.loc[numeric_df[na_target].isna() == False, non_na_columns]
+    X_test = numeric_df.loc[numeric_df[na_target].isna() == True, non_na_columns]
+
+    knn = KNeighborsRegressor()
+    knn.fit(X_train, y_train)
+
+    y_pred = knn.predict(X_test)
+
+    df.loc[df[na_target].isna() == True, na_target] = y_pred
+
+    return df
+
+data3.columns[data3.isna().sum() > 0]
+
+for column in [
+    'LotFrontage',
+    'MasVnrArea',
+    'BsmtFinSF1',
+    'BsmtFinSF2',
+    'BsmtUnfSF',
+    'TotalBsmtSF', 
+    'BsmtFullBath',
+    'BsmtHalfBath',
+    'GarageYrBlt',
+    'GarageCars',
+    'GarageArea'
+    ]:
+    data3 = knn_impute(data3, column)
+
+data3.isna().sum()
+
+data4 = data3.copy()
+
+# Feature Engineering
+
+data4
+
+data4['SqFtPerRoom'] = data4['GrLivArea'] / (data4['TotRmsAbvGrd'] + data4['FullBath'] + data4['HalfBath'] + data4['KitchenAbvGr'])
+data4['Total_Home_Quality'] = data4['OverallQual'] + data4['OverallCond']
+data4['Total_Bathrooms'] = (data4['FullBath'] + (0.5 * data4['HalfBath']) + data4['BsmtFullBath'] + (0.5 * data4['BsmtHalfBath']))
+data4['HighQualSF'] = data4['1stFlrSF'] + data4['2ndFlrSF']
+
+data5 = data4.copy()
+
+### Feature Transformation
+
+The reason to do feature transformation because certain models will perform better when the data is normally distributed. And we can always guarantee a normal distribution from a feature column.
+
+##### Log Transformation for Skewed Features
+
+import scipy.stats 
+
+data4.select_dtypes(np.number).head()
+
+scipy.stats.skew(data3['LotFrontage']) #Positive value = Right Skewed, Negative Value = Left Skewed
+
+If the skew value is '0' means its normally distributed, +ve value = Right Skewed, -ve value = Left Skewed
+
+In general, if the value is above '0.5' , we can consider the data is skewed and it may be need transformation.
+
+skew_df = pd.DataFrame(data4.select_dtypes(np.number).columns, columns=['Feature'])
+skew_df['Skew'] = skew_df['Feature'].apply(lambda feature: scipy.stats.skew(data4[feature]))
+skew_df['Absolute Skew'] = skew_df['Skew'].apply(abs)
+skew_df['Skewed'] = skew_df['Absolute Skew'].apply(lambda x: True if x >= 0.5 else False)
+skew_df
+
+data4[skew_df.query('Skewed == True')['Feature'].values].describe()
+
+np.log1p(0)   ##log(0) is undefined to we basically +1 each value and take the logarithmic value
+
+for column in skew_df.query('Skewed == True')['Feature'].values:
+    data4[column] = np.log1p(data4[column])
+
+#### Cosine Transform for Cyclical Features(Month)
+
+data4['MoSold'].unique()
+
+np.min(-np.cos(0.5326 * data4['MoSold'])), np.max(-np.cos(0.5326 * data4['MoSold']))
+
+data4['MoSold'] = (-np.cos(0.5326 * data4['MoSold']))
+
+data5 = data4.copy()
+
+### Encode Categoricals
+
+data5 = pd.get_dummies(data5)
+
+data6 = data5.copy()
+
+### Scaling
+
+##### Standard Scaler (Because it center the data is 0)
+
+from sklearn.preprocessing import StandardScaler
+
+scaler = StandardScaler()
+scaler.fit(data6)
+
+data6 = pd.DataFrame(scaler.transform(data6), index=data6.index, columns=data6.columns)
+
+data6
+
+### Target Transformation
+
+target
+
+target.hist()
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+sns.set_style('darkgrid')
+
+np.min(target)
+
+plt.figure(figsize=(20,8))
+
+plt.subplot(1, 2, 1)
+sns.distplot(target, kde=True, fit=scipy.stats.norm)
+plt.title('Without Log Transform')
+
+plt.subplot(1, 2, 2)
+sns.distplot(np.log(target), kde=True, fit=scipy.stats.norm)
+plt.xlabel('Log SalePrice')
+plt.title('With Log Transform')
+
+plt.show()
+
+log_target = np.log(target)
+
+log_target
+
+np.exp(log_target)
+
+data7 = data6.copy()
+
+### Split data
+
+train_final = data7.loc[:train0.index.max(), :].copy()
+test_final = data7.loc[train0.index.max() + 1:, :].reset_index(drop=True).copy()
+
+train_final
+
+### Hyperparameter Optimization
+
+import optuna
+
+def br_objective(trial):
+    n_iter = trial.suggest_int("n_iter", 50, 600)
+    tol = trial.suggest_loguniform('tol', 1e-7, 10.0)
+    alpha_1 = trial.suggest_loguniform('alpha_1', 1e-8, 10.0)
+    alpha_2 = trial.suggest_loguniform('alpha_2', 1e-8, 10.0)
+    lambda_1 = trial.suggest_loguniform('lambda_1', 1e-8, 10.0)
+    lambda_2 = trial.suggest_loguniform('lambda_2', 1e-8, 10.0)
+
+    model = BayesianRidge(
+        n_iter=n_iter,
+        tol=tol,
+        alpha_1=alpha_1,
+        alpha_2=alpha_2,
+        lambda_1=lambda_1,
+        lambda_2=lambda_2
+    )
+
+    model.fit(train_final, log_target)
+
+    cv_score = np.exp(np.sqrt(-cross_val_score(model, train_final, log_target, scoring='neg_mean_squared_error', cv=kf)))
+
+    return np.mean(cv_score)
+
+study = optuna.create_study(direction='minimize')
+
+study.optimize(br_objective, n_trials=100)
+
+study.best_params
+
+### Model Selection
+
+from pycaret.regression import setup, compare_models
+
+#_ = setup(data=pd.concat([train_final, log_target], axis=1), target='SalePrice')
+
+#compare_models()
+
+from catboost import CatBoostRegressor
+from sklearn.linear_model import BayesianRidge, HuberRegressor, Ridge, OrthogonalMatchingPursuit
+from lightgbm import LGBMRegressor
+from sklearn.ensemble import GradientBoostingRegressor
+from xgboost import XGBRegressor
+
+# Baseline Model
+
+#from sklearn.model_selection import KFold, cross_val_score
+
+#baseline_model = CatBoostRegressor(verbose=0)
+
+#baseline_model.fit(train_final, log_target)
+
+### Bagging Ensemble
+
+catboost_params = {
+    'iterations': 6000,
+    'learning_rate': 0.005,
+    'depth': 4,
+    'l2_leaf_reg': 1,
+    'eval_metric': 'RMSE',
+    'early_stopping_rounds': 200,
+    'random_seed': 42
+}
+
+br_params = {
+    'n_iter': 600,
+    'tol': 0.00011320679834879744,
+    'alpha_1': 0.4712377924281483,
+    'alpha_2': 9.236983813720157,
+    'lambda_1': 1.2155951341128131e-06,
+    'lambda_2': 9.157153721136607e-05
+}
+
+lightgbm_params = {
+    'num_leaves': 39,
+    'max_depth': 2,
+    'learning_rate': 0.13705339989856127,
+    'n_estimators': 273
+}
+
+ridge_params = {
+    'alpha': 631.1412445239156
+}
+
+models = {
+    'catboost': CatBoostRegressor(**catboost_params, verbose=0),
+    'br': BayesianRidge(**br_params),
+    'lightgbm': LGBMRegressor(**lightgbm_params),
+    'ridge': Ridge(**ridge_params),
+    'omp': OrthogonalMatchingPursuit()
+}
+
+for name, model in models.items():
+    model.fit(train_final, log_target)
+    print(name + ' trained.')
+
+### Evaluate
+
+results = {}
+
+kf = KFold(n_splits=10)
+
+for name, model in models.items():
+    result = np.exp(np.sqrt(-cross_val_score(model, train_final, log_target, scoring='neg_mean_squared_error', cv=kf)))
+    results[name] = result
+
+results
+
+for name, result in results.items():
+    print('--------\n' + name + '\n--------')
+    print(np.mean(result))
+    print(np.std(result))
+
+### Combine Predictions
+
+final_predictions = (
+    0.4 * np.exp(models['catboost'].predict(test_final)) +
+    0.2 * np.exp(models['br'].predict(test_final)) +
+    0.2 * np.exp(models['lightgbm'].predict(test_final)) +
+    0.1 * np.exp(models['ridge'].predict(test_final)) +
+    0.1 * np.exp(models['omp'].predict(test_final))
+)
+
+final_predictions
+
+#plt.figure(figsize=(12,8))
+
+#for name, model in models.items():
+  #  sns.distplot(results[name], bins=10, kde=True, label=name)
+
+#plt.title('CV Error Distributions')
+#plt.show()
+
+### Make Submission
+
+submission = pd.concat([test_ids, pd.Series(final_predictions, name='SalePrice')], axis=1)
+submission
+
+submission.to_csv('submission_final.csv', index=False, header=True)
+
+(314-70)/(4482-70)
